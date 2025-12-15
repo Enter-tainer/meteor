@@ -70,45 +70,112 @@ def detect_meteor(image_path: Path, config: dict) -> tuple[bool, np.ndarray | No
     
     # 分析检测到的线条
     meteor_lines = []
-    min_aspect_ratio = config.get("min_aspect_ratio", 3.0)  # 流星应该是细长的
+    min_aspect_ratio = config.get("min_aspect_ratio", 8.0)  # 流星应该是非常细长的
+    max_line_width = config.get("max_line_width", 15)  # 流星宽度不应该太宽
+    exclude_bottom = config.get("exclude_bottom", 0.2)  # 排除底部区域
+    min_angle = config.get("min_angle", 15.0)  # 最小角度，排除水平线
+    
+    img_height = gray.shape[0]
+    max_y = int(img_height * (1 - exclude_bottom))  # 底部排除线
     
     for line in lines:
         x1, y1, x2, y2 = line[0]
+        
+        # 检查是否在底部排除区域
+        if y1 > max_y and y2 > max_y:
+            continue  # 整条线都在底部区域，跳过
+        
+        # 计算线条角度（相对于水平线）
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        angle = np.degrees(np.arctan2(dy, dx))  # 0度=水平，90度=垂直
+        
+        # 排除接近水平的线条
+        if angle < min_angle:
+            continue
+        
         length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
         
-        # 计算线条周围的亮度
-        # 创建一个mask来提取线条区域
+        # 创建一个mask来分析线条区域
         mask = np.zeros(gray.shape, dtype=np.uint8)
-        cv2.line(mask, (x1, y1), (x2, y2), 255, 5)
+        cv2.line(mask, (x1, y1), (x2, y2), 255, 3)
+        
+        # 计算线条区域的平均亮度
         mean_brightness = cv2.mean(gray, mask=mask)[0]
+        
+        # 分析线条的宽度：在二值图上沿线条方向采样
+        # 创建一个更宽的mask来提取线条周围区域
+        wide_mask = np.zeros(gray.shape, dtype=np.uint8)
+        cv2.line(wide_mask, (x1, y1), (x2, y2), 255, 30)  # 较宽的区域
+        
+        # 在这个区域内找到实际的亮区域轮廓
+        masked_binary = cv2.bitwise_and(binary, binary, mask=wide_mask)
+        contours, _ = cv2.findContours(masked_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 计算最大轮廓的长宽比
+        line_width = 0
+        aspect_ratio = 0
+        if contours:
+            # 找到最大的轮廓
+            max_contour = max(contours, key=cv2.contourArea)
+            # 使用最小外接矩形计算长宽比
+            rect = cv2.minAreaRect(max_contour)
+            w, h = rect[1]
+            if w > 0 and h > 0:
+                # 确保长边/短边
+                if w < h:
+                    w, h = h, w
+                aspect_ratio = w / h
+                line_width = h  # 短边就是宽度
         
         # 流星判断条件：
         # 1. 长度足够长
         # 2. 线条区域的平均亮度足够高
+        # 3. 长宽比足够大（细长）
+        # 4. 宽度不能太宽
         min_brightness = config.get("min_line_brightness", 150)
         
-        if length >= min_line_length and mean_brightness >= min_brightness:
-            meteor_lines.append((x1, y1, x2, y2, length, mean_brightness))
+        is_meteor = (
+            length >= min_line_length and 
+            mean_brightness >= min_brightness and
+            aspect_ratio >= min_aspect_ratio and
+            line_width <= max_line_width
+        )
+        
+        if is_meteor:
+            meteor_lines.append((x1, y1, x2, y2, length, mean_brightness, aspect_ratio, line_width))
             
             if debug_img is not None:
-                # 在调试图像上标注检测到的流星
+                # 在调试图像上标注检测到的流星（绿色）
                 cv2.line(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(
                     debug_img,
-                    f"L:{length:.0f} B:{mean_brightness:.0f}",
+                    f"L:{length:.0f} B:{mean_brightness:.0f} R:{aspect_ratio:.1f} W:{line_width:.1f}",
                     (x1, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (0, 255, 0),
                     1
                 )
+        elif debug_img is not None and config.get("verbose", False):
+            # 在调试图像上标注被排除的线条（红色）
+            cv2.line(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+            cv2.putText(
+                debug_img,
+                f"L:{length:.0f} R:{aspect_ratio:.1f} W:{line_width:.1f}",
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (0, 0, 255),
+                1
+            )
     
     has_meteor = len(meteor_lines) > 0
     
     if has_meteor and config.get("verbose", False):
         print(f"  检测到 {len(meteor_lines)} 条潜在流星轨迹")
-        for i, (x1, y1, x2, y2, length, brightness) in enumerate(meteor_lines):
-            print(f"    #{i+1}: 长度={length:.1f}px, 亮度={brightness:.1f}")
+        for i, (x1, y1, x2, y2, length, brightness, aspect_ratio, width) in enumerate(meteor_lines):
+            print(f"    #{i+1}: 长度={length:.1f}px, 亮度={brightness:.1f}, 长宽比={aspect_ratio:.1f}, 宽度={width:.1f}px")
     
     return has_meteor, debug_img
 
@@ -338,6 +405,30 @@ def main():
         default=10,
         help="最大线段间隙（像素），默认10"
     )
+    parser.add_argument(
+        "--min-aspect-ratio",
+        type=float,
+        default=8.0,
+        help="最小长宽比（流星应该很细长），默认8.0"
+    )
+    parser.add_argument(
+        "--max-width",
+        type=float,
+        default=15.0,
+        help="最大线条宽度（像素），默认15"
+    )
+    parser.add_argument(
+        "--exclude-bottom",
+        type=float,
+        default=0.1,
+        help="排除图像底部的比例 (0-1)，默认0.1表示排除底部10%%区域"
+    )
+    parser.add_argument(
+        "--min-angle",
+        type=float,
+        default=3.0,
+        help="最小角度（度），排除接近水平的线条，默认3度"
+    )
     
     args = parser.parse_args()
     
@@ -362,6 +453,10 @@ def main():
         "min_line_brightness": args.min_brightness,
         "hough_threshold": args.hough_threshold,
         "max_line_gap": args.max_gap,
+        "min_aspect_ratio": args.min_aspect_ratio,
+        "max_line_width": args.max_width,
+        "exclude_bottom": args.exclude_bottom,
+        "min_angle": args.min_angle,
         "start_from": args.start_from,
     }
     
@@ -380,6 +475,10 @@ def main():
     print(f"  最小流星长度: {config['min_line_length']}px")
     print(f"  最小平均亮度: {config['min_line_brightness']}")
     print(f"  霍夫阈值: {config['hough_threshold']}")
+    print(f"  最小长宽比: {config['min_aspect_ratio']}")
+    print(f"  最大线条宽度: {config['max_line_width']}px")
+    print(f"  排除底部区域: {config['exclude_bottom']*100:.0f}%")
+    print(f"  最小角度: {config['min_angle']}°")
     print("=" * 50)
     print()
     
