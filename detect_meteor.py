@@ -319,6 +319,20 @@ def process_folder(
         else:
             print(f"警告: 未找到包含 '{start_from}' 的文件，从头开始处理")
     
+    # 如果指定了结束文件，截断列表
+    end_at = config.get("end_at")
+    if end_at:
+        end_index = None
+        for i, f in enumerate(jpg_files):
+            if end_at in f.stem:
+                end_index = i
+                break
+        if end_index is not None:
+            jpg_files = jpg_files[:end_index + 1]  # 包含结束文件
+            print(f"处理到 {end_at} 为止（共 {len(jpg_files)} 个文件）")
+        else:
+            print(f"警告: 未找到包含 '{end_at}' 的文件，处理到最后")
+    
     stats["total"] = len(jpg_files)
     
     num_workers = config.get("workers", multiprocessing.cpu_count())
@@ -423,6 +437,12 @@ def main():
         help="从指定文件名开始处理（跳过之前的文件），例如: MGT04412"
     )
     parser.add_argument(
+        "--end-at",
+        type=str,
+        default=None,
+        help="处理到指定文件名为止（包含该文件），例如: MGT05000"
+    )
+    parser.add_argument(
         "--workers", "-j",
         type=int,
         default=None,
@@ -513,6 +533,7 @@ def main():
         "exclude_bottom": args.exclude_bottom,
         "min_angle": args.min_angle,
         "start_from": args.start_from,
+        "end_at": args.end_at,
         "workers": args.workers or multiprocessing.cpu_count(),
     }
     

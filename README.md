@@ -53,6 +53,18 @@ uv run python detect_meteor.py /mnt/sdcard/DCIM output --debug --save-debug-imag
 uv run python detect_meteor.py /mnt/sdcard/DCIM output --debug --start-from MGT04412
 ```
 
+### 指定处理范围
+
+```bash
+# 从 MGT04412 开始，到 MGT05000 结束
+uv run python detect_meteor.py /mnt/sdcard/DCIM output --debug --start-from MGT04412 --end-at MGT05000
+```
+
+```bash
+# 只处理到 MGT05000
+uv run python detect_meteor.py /mnt/sdcard/DCIM output --debug --end-at MGT05000
+```
+
 ### 调整检测参数
 
 ```bash
@@ -107,6 +119,7 @@ uv run python detect_meteor.py /mnt/sdcard/DCIM output --debug -v --save-debug-i
 | `--recursive, -r` | 递归搜索子文件夹 |
 | `--save-debug-images` | 保存带检测标注的图像 |
 | `--start-from` | 从指定文件名开始处理 |
+| `--end-at` | 处理到指定文件名为止（包含） |
 | `--workers, -j` | 并行进程数，默认为 CPU 核心数 |
 
 ### 检测参数
