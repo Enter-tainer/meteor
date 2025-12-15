@@ -6,6 +6,8 @@
 
 import argparse
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 from pathlib import Path
 
 import cv2
@@ -205,6 +207,57 @@ def find_raw_file(jpg_path: Path, raw_extensions: list[str] = None) -> Path | No
     return None
 
 
+def process_single_image(args: tuple) -> dict:
+    """
+    处理单张图片（用于并行处理）
+    
+    Args:
+        args: (jpg_path, config, output_folder, debug_folder)
+        
+    Returns:
+        处理结果字典
+    """
+    jpg_path, config, output_folder, debug_folder = args
+    
+    result = {
+        "path": jpg_path,
+        "has_meteor": False,
+        "copied_jpg": False,
+        "copied_raw": False,
+        "raw_not_found": False,
+        "debug_img": None,
+    }
+    
+    # 检测流星
+    has_meteor, debug_img = detect_meteor(jpg_path, config)
+    result["has_meteor"] = has_meteor
+    
+    if has_meteor:
+        # 复制JPG
+        dst_jpg = output_folder / jpg_path.name
+        if not config.get("dry_run", False):
+            shutil.copy2(jpg_path, dst_jpg)
+            result["copied_jpg"] = True
+        
+        # 如果不是debug模式，也复制RAW文件
+        if not config.get("debug", False):
+            raw_path = find_raw_file(jpg_path)
+            if raw_path:
+                dst_raw = output_folder / raw_path.name
+                if not config.get("dry_run", False):
+                    shutil.copy2(raw_path, dst_raw)
+                    result["copied_raw"] = True
+            else:
+                result["raw_not_found"] = True
+        
+        # 保存调试图像
+        if debug_folder and debug_img is not None:
+            debug_path = debug_folder / f"debug_{jpg_path.stem}.jpg"
+            cv2.imwrite(str(debug_path), debug_img)
+    
+    return result
+
+
 def process_folder(
     input_folder: Path,
     output_folder: Path,
@@ -268,52 +321,48 @@ def process_folder(
     
     stats["total"] = len(jpg_files)
     
+    num_workers = config.get("workers", multiprocessing.cpu_count())
     print(f"找到 {len(jpg_files)} 个JPG文件")
+    print(f"使用 {num_workers} 个并行进程")
     print("-" * 50)
     
-    for i, jpg_path in enumerate(jpg_files, 1):
-        relative_path = jpg_path.relative_to(input_folder) if jpg_path.is_relative_to(input_folder) else jpg_path.name
-        print(f"[{i}/{len(jpg_files)}] 处理: {relative_path}")
+    # 准备并行任务参数
+    tasks = [(jpg_path, config, output_folder, debug_folder) for jpg_path in jpg_files]
+    
+    # 使用进程池并行处理
+    completed = 0
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # 提交所有任务
+        future_to_path = {executor.submit(process_single_image, task): task[0] for task in tasks}
         
-        # 检测流星
-        has_meteor, debug_img = detect_meteor(jpg_path, config)
-        
-        if has_meteor:
-            stats["meteor_detected"] += 1
-            print(f"  ✓ 检测到流星!")
+        # 收集结果
+        for future in as_completed(future_to_path):
+            jpg_path = future_to_path[future]
+            completed += 1
             
-            # 复制JPG
-            dst_jpg = output_folder / jpg_path.name
-            if not config.get("dry_run", False):
-                shutil.copy2(jpg_path, dst_jpg)
-                stats["copied_jpg"] += 1
-                print(f"  → 复制JPG: {dst_jpg.name}")
-            else:
-                print(f"  → [模拟] 复制JPG: {dst_jpg.name}")
-            
-            # 如果不是debug模式，也复制RAW文件
-            if not config.get("debug", False):
-                raw_path = find_raw_file(jpg_path)
-                if raw_path:
-                    dst_raw = output_folder / raw_path.name
-                    if not config.get("dry_run", False):
-                        shutil.copy2(raw_path, dst_raw)
+            try:
+                result = future.result()
+                relative_path = jpg_path.relative_to(input_folder) if jpg_path.is_relative_to(input_folder) else jpg_path.name
+                
+                if result["has_meteor"]:
+                    stats["meteor_detected"] += 1
+                    print(f"[{completed}/{len(jpg_files)}] ✓ 流星: {relative_path}")
+                    
+                    if result["copied_jpg"]:
+                        stats["copied_jpg"] += 1
+                    if result["copied_raw"]:
                         stats["copied_raw"] += 1
-                        print(f"  → 复制RAW: {dst_raw.name}")
-                    else:
-                        print(f"  → [模拟] 复制RAW: {dst_raw.name}")
+                    if result["raw_not_found"]:
+                        stats["raw_not_found"] += 1
+                elif config.get("verbose", False):
+                    print(f"[{completed}/{len(jpg_files)}] - 无流星: {relative_path}")
                 else:
-                    stats["raw_not_found"] += 1
-                    print(f"  ! 未找到对应的RAW文件")
-            
-            # 保存调试图像
-            if debug_folder and debug_img is not None:
-                debug_path = debug_folder / f"debug_{jpg_path.stem}.jpg"
-                cv2.imwrite(str(debug_path), debug_img)
-                print(f"  → 保存调试图像: {debug_path.name}")
-        else:
-            if config.get("verbose", False):
-                print(f"  - 未检测到流星")
+                    # 简单进度显示
+                    if completed % 50 == 0 or completed == len(jpg_files):
+                        print(f"进度: {completed}/{len(jpg_files)} ({completed*100//len(jpg_files)}%)")
+                        
+            except Exception as e:
+                print(f"[{completed}/{len(jpg_files)}] 错误处理 {jpg_path.name}: {e}")
     
     return stats
 
@@ -372,6 +421,12 @@ def main():
         type=str,
         default=None,
         help="从指定文件名开始处理（跳过之前的文件），例如: MGT04412"
+    )
+    parser.add_argument(
+        "--workers", "-j",
+        type=int,
+        default=None,
+        help="并行进程数，默认为CPU核心数"
     )
     
     # 检测参数
@@ -458,6 +513,7 @@ def main():
         "exclude_bottom": args.exclude_bottom,
         "min_angle": args.min_angle,
         "start_from": args.start_from,
+        "workers": args.workers or multiprocessing.cpu_count(),
     }
     
     # 打印配置信息
